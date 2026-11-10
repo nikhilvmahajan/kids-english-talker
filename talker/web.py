@@ -4,7 +4,7 @@
 Small, standard library only, no GPU. `tailscale serve` forwards HTTPS from the
 user's own devices to 127.0.0.1:8765 (K-D4).
 
-  GET  /             the page (static/index.html)
+  GET  /             the page (static/index.html); also the app files in STATIC (manifest, icons)
   GET  /status       session state and the current child's name
   GET  /profiles     the children's names and stars
   GET  /profile?name=  one child's stars, counts and all stickers (earned or not yet)
@@ -52,6 +52,9 @@ STT, TTS, OLLAMA = "http://127.0.0.1:8766", "http://127.0.0.1:8767", "http://127
 PY_STT = PROJECT / ".venv" / "bin" / "python"
 PY_TTS = PROJECT / "k_t3" / ".venv-parler" / "bin" / "python"
 RUN, LOG, PAGE = HERE / "run", HERE / "log.jsonl", HERE / "static" / "index.html"
+# Files for the home-screen app (install or "Add to Home screen"); only these are served.
+STATIC = {"/manifest.webmanifest": "application/manifest+json", "/icon.svg": "image/svg+xml",
+          "/icon-192.png": "image/png", "/icon-512.png": "image/png"}
 MAX_UPLOAD = 5 * 1024 * 1024
 BIG_APP_MIB, NEED_FREE_MIB = 500, 9000
 HISTORY_MESSAGES = 12
@@ -629,6 +632,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(page)
+            elif self.path in STATIC:
+                data = (HERE / "static" / self.path.lstrip("/")).read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", STATIC[self.path])
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "max-age=86400")
+                self.end_headers()
+                self.wfile.write(data)
             elif self.path == "/status":
                 s = self.session
                 self.send_json(200, {"state": s.state, "character": s.config["character"],
@@ -716,6 +727,10 @@ def main() -> int:
         print(f"web: cannot listen on {HOST}:{PORT}: {e}", file=sys.stderr)
         return 1
     server.daemon_threads = True
+
+    def on_term(signum, frame):  # systemd stops the service with SIGTERM: clean up like Ctrl+C
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, on_term)
     threading.Thread(target=Handler.session.idle_watch, daemon=True).start()
     print(f"web: Toffee on http://{HOST}:{PORT} (stops after {config['idle_minutes']} idle minutes)", flush=True)
     try:

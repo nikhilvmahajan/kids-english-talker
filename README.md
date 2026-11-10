@@ -62,6 +62,8 @@ sudo tailscale serve --bg 8765   # optional: HTTPS for your own phone
 
 `talker/config.json` holds the character's name and description, the models and the time limits.
 
+To start the talker at boot (as a systemd user service) and to put Toffee on a phone's home screen as an app, see `RUNNING.md`.
+
 ## Folders
 
 | Folder | What it is |
@@ -72,6 +74,7 @@ sudo tailscale serve --bg 8765   # optional: HTTPS for your own phone
 | `k_t3/` | Tests: voice candidates (Kokoro, Indic Parler-TTS), Priya with pitch raised, time to first sound |
 | `k_t4/` | Test: language models as the character, with 27 synthetic child turns × 3 runs × ages 6 and 10, and automatic rule checks |
 | `load_creds.py` | Copies `KEY=VALUE` lines from `credentials.cred` into `.env`; prints key names only |
+| `deploy/` | `kids-talker.service`: systemd user service for the web process (models still load only on Start) |
 
 Tests that touch profiles must set `TALKER_PROFILES` to a separate file, so they never change real children's data.
 
@@ -112,7 +115,7 @@ Comments refer to the author's design log. The ones that appear in the code:
 - Whisper has not been tested on children's voices. Names are its weak point (it heard "Nagpur" as "Naktur").
 - On Firefox for Android, streamed audio did not start until the whole answer arrived, so the voice is sent as one small file per sentence.
 - The model follows each rule most of the time, not every time; code checks cover the most important ones, but not all.
-- One child at a time. The web process runs in the foreground (no system service yet).
+- One child at a time.
 
 ## Licence
 

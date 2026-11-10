@@ -1,0 +1,28 @@
+# Toffee talker: the always-on web process, started at boot as a systemd user service.
+# It holds no GPU. The speech-to-text and voice models, and Gemma in Ollama, load only
+# when someone presses Start on the phone, and unload at End, at the 15-minute goodbye,
+# or after 5 quiet minutes.
+#
+# Install (see RUNNING.md):
+#   cp deploy/kids-talker.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now kids-talker.service
+#   sudo loginctl enable-linger "$USER"    # once: start at boot without a login
+
+[Unit]
+Description=Toffee talker web process (models load only on Start)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/kids_english/talker
+ExecStart=/usr/bin/python3 -I web.py
+Restart=on-failure
+RestartSec=5
+# Stopping the service also stops the speech and voice services that web.py started.
+KillMode=control-group
+# web.py ends the session on SIGTERM: stops the services, unloads Gemma, waits up to 30 s for the GPU.
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target
