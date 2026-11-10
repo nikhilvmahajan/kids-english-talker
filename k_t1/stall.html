@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K-T1 stall test</title>
+<style>
+  :root { --bg: #f7f5f0; --fg: #222; --muted: #666; --btn: #e8833a; --bad: #c4442a; --line: #ddd; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1b1d; --fg: #eee; --muted: #aaa; --btn: #e8833a; --bad: #ff6b4a; --line: #333; }
+  }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+         font: 16px/1.4 system-ui, sans-serif; }
+  h1 { font-size: 1.1rem; margin: 0 0 12px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; padding: 6px 10px; }
+  legend { font-size: 0.85rem; color: var(--muted); }
+  label { display: block; padding: 4px 0; }
+  button { font: inherit; padding: 12px 20px; border-radius: 8px; border: 0; background: var(--btn); color: #fff; }
+  #status { margin: 12px 0; min-height: 1.5em; }
+  #status.err { color: var(--bad); font-weight: 600; }
+  #summary { font-weight: 600; white-space: pre-line; }
+  #stalls { font-size: 0.85rem; white-space: pre-line; color: var(--bad); }
+  .note { color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<h1>K-T1 stall test</h1>
+<p class="note">Sends 15 KB every 2 seconds for 3 minutes and receives the 13 KB reply, like one talk turn.
+No microphone. Keep this page open and the screen on. Do not touch the phone during the run.</p>
+<fieldset>
+  <legend>Network for this run</legend>
+  <label><input type="radio" name="net" value="wifi" checked> Wi-Fi</label>
+  <label><input type="radio" name="net" value="mobile"> Mobile data</label>
+</fieldset>
+<button id="go">Start 3-minute run</button>
+<div id="status"></div>
+<div id="summary"></div>
+<div id="stalls"></div>
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const PERIOD_MS = 2000, RUN_MS = 180000, BODY_BYTES = 15000, TIMEOUT_MS = 20000, STALL_MS = 2000;
+const body = new Uint8Array(BODY_BYTES);
+crypto.getRandomValues(body);
+let running = false, wakeLock = null;
+
+function say(text, isError = false) { $("#status").textContent = text; $("#status").className = isError ? "err" : ""; }
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const net = () => document.querySelector('input[name="net"]:checked').value;
+
+function postLog(entry) {
+  fetch("log", { method: "POST", headers: { "Content-Type": "application/json" },
+                 body: JSON.stringify(entry), cache: "no-store" })
+    .then((r) => { if (!r.ok) say(`Result not saved: server answered ${r.status}`, true); })
+    .catch((e) => say(`Result not saved: ${e.name}: ${e.message}`, true));
+}
+
+async function one() {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+  const t0 = performance.now();
+  try {
+    const resp = await fetch("turn", { method: "POST", body, cache: "no-store", signal: ac.signal,
+                                       headers: { "Content-Type": "audio/webm" } });
+    const t1 = performance.now();
+    if (!resp.ok) return { error: `HTTP ${resp.status}`, total_ms: t1 - t0 };
+    const buf = await resp.arrayBuffer();
+    const t2 = performance.now();
+    const serverMs = Number(resp.headers.get("X-Server-Ms"));
+    return { request_ms: t1 - t0, download_ms: t2 - t1, total_ms: t2 - t0,
+             server_ms: Number.isFinite(serverMs) ? serverMs : -1, reply_bytes: buf.byteLength };
+  } catch (e) {
+    // AbortError = no answer within 20 s; TypeError = network failure
+    return { error: `${e.name}: ${e.message}`, total_ms: performance.now() - t0 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function summarise(results) {
+  const ok = results.filter((r) => !r.error).map((r) => r.total_ms).sort((a, b) => a - b);
+  const errors = results.filter((r) => r.error).length;
+  const stalls = results.filter((r) => !r.error && r.total_ms > STALL_MS).length;
+  if (ok.length === 0) return `${results.length} requests, ${errors} errors.`;
+  const pick = (q) => Math.round(ok[Math.min(ok.length - 1, Math.floor(q * ok.length))]);
+  return `${results.length} requests, ${errors} errors, ${stalls} over ${STALL_MS / 1000} s.\n` +
+         `Median ${pick(0.5)} ms, 90th percentile ${pick(0.9)} ms, worst ${Math.round(ok[ok.length - 1])} ms.`;
+}
+
+async function run() {
+  if (running) return;
+  running = true;
+  $("#go").disabled = true;
+  const results = [], network = net(), stallLines = [];
+  $("#stalls").textContent = "";
+  try {
+    if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen");
+    else say("This browser cannot keep the screen on. Keep it on by hand.");
+  } catch (e) { say(`Screen not locked on (${e.name}). Keep it on by hand.`); }
+  const tEnd = performance.now() + RUN_MS;
+  let seq = 0;
+  while (running && performance.now() < tEnd) {
+    const tStart = performance.now();
+    seq += 1;
+    const r = await one();
+    if (!running) break;  // page hidden during the request: do not count it
+    results.push(r);
+    postLog({ ...r, seq, kind: "stall", net: network, upload_bytes: BODY_BYTES, ua: navigator.userAgent });
+    if (r.error || r.total_ms > STALL_MS) {
+      const clock = new Date().toTimeString().slice(0, 8);
+      stallLines.push(`#${seq} at ${clock}: ${r.error ? r.error : Math.round(r.total_ms) + " ms"}`);
+      $("#stalls").textContent = stallLines.join("\n");
+    }
+    $("#summary").textContent = `${network}: ` + summarise(results);
+    if (!$("#status").classList.contains("err")) say(`Run ${Math.round((tEnd - performance.now()) / 1000)} s left.`);
+    const wait = PERIOD_MS - (performance.now() - tStart);
+    if (wait > 0) await sleep(wait);
+  }
+  const stoppedEarly = !running;
+  running = false;
+  if (wakeLock) { wakeLock.release().catch((e) => say(`Screen lock release failed: ${e.name}`, true)); wakeLock = null; }
+  $("#go").disabled = false;
+  say(stoppedEarly ? "Stopped early: the page was hidden. The results above are up to that point." : "Run complete.",
+      stoppedEarly);
+}
+
+$("#go").addEventListener("click", run);
+document.addEventListener("visibilitychange", () => { if (document.hidden && running) running = false; });
+</script>
+</body>
+</html>

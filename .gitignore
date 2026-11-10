@@ -1,0 +1,31 @@
+# Secrets: never commit
+.env
+*.cred
+
+# Python environments and caches
+.venv/
+.venv-*/
+__pycache__/
+*.pyc
+
+# Model weights (downloaded; several GB)
+models/
+
+# Children's data and runtime records (K-D12, K-P6)
+talker/profiles.json
+talker/profiles.json.bak
+talker/profiles.tmp
+talker/log.jsonl
+talker/run/
+
+# Test outputs (results, generated audio, personal grading)
+k_t1/results.jsonl
+k_t1/paths*.jsonl
+k_t2/results.jsonl
+k_t3/samples/
+k_t4/results/
+k_t4/grading.md
+k_t4/grading_key.json
+
+# The private project log; the README is the public description
+kids_english.md

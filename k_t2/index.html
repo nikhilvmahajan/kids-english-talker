@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K-T2 speech-to-text</title>
+<style>
+  :root { --bg: #f7f5f0; --fg: #222; --muted: #666; --btn: #e8833a; --btn-on: #c4442a; --line: #ddd; --card: #fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1b1d; --fg: #eee; --muted: #aaa; --btn: #e8833a; --btn-on: #ff6b4a; --line: #333; --card: #26262a; }
+  }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, sans-serif; }
+  h1 { font-size: 1.1rem; margin: 0 0 8px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; padding: 6px 10px; }
+  legend { font-size: 0.85rem; color: var(--muted); }
+  label { display: inline-block; padding: 4px 12px 4px 0; }
+  button { font: inherit; border: 0; border-radius: 8px; padding: 10px 16px; background: var(--btn); color: #fff; }
+  button.plain { background: transparent; color: var(--btn); border: 1px solid var(--btn); }
+  #card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 8px 0; }
+  #sentence { font-size: 1.3rem; margin: 6px 0; }
+  #talk { display: none; width: 160px; height: 160px; margin: 12px auto; border-radius: 50%; font-size: 1.1rem;
+          touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  #talk.on { background: var(--btn-on); transform: scale(1.05); }
+  .wrap { text-align: center; }
+  #heard { font-size: 1.1rem; margin: 8px 0; min-height: 1.4em; }
+  #status { min-height: 1.4em; margin: 8px 0; }
+  #status.err { color: var(--btn-on); font-weight: 600; }
+  #marks { display: none; gap: 8px; justify-content: center; }
+  #summary { font-weight: 600; white-space: pre-line; margin-top: 8px; }
+  .note { color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<h1>K-T2: does Whisper hear you right?</h1>
+<p class="note">What Whisper hears shows on this phone only. The desktop saves numbers, never the words or the audio.</p>
+
+<fieldset>
+  <legend>Mode</legend>
+  <label><input type="radio" name="mode" value="read" checked> Read a sentence</label>
+  <label><input type="radio" name="mode" value="free"> Free talk</label>
+</fieldset>
+<fieldset>
+  <legend>Whisper model</legend>
+  <label><input type="radio" name="model" value="small" checked> small</label>
+  <label><input type="radio" name="model" value="large-v3-turbo"> large-v3-turbo</label>
+</fieldset>
+
+<div id="card">
+  <div class="note" id="cardhead"></div>
+  <div id="sentence"></div>
+  <button class="plain" id="next">Next sentence</button>
+</div>
+
+<div class="wrap">
+  <button id="start">Start (allow the microphone)</button>
+  <button id="talk">Hold to talk</button>
+</div>
+<div id="heard"></div>
+<fieldset id="probebox" style="display:none">
+  <legend>What you try in this turn (before you press)</legend>
+  <select id="probe">
+    <option value="silence">Say nothing (room noise only)</option>
+    <option value="one-word">One word ("yes", "tiger")</option>
+    <option value="hesitation">Hesitation ("I like… umm… the…")</option>
+    <option value="hindi-mix">Hindi or Marathi words mixed in</option>
+    <option value="fast">Fast or mumbled, like a child</option>
+    <option value="noise">Fan, TV or other noise in the background</option>
+    <option value="other">Other</option>
+  </select>
+</fieldset>
+<div id="marks"><button id="ok">Heard right</button><button class="plain" id="bad">Heard wrong</button></div>
+<div id="status"></div>
+<div id="summary"></div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const SENTENCES = [
+  "My favourite animal is the tiger.",
+  "My friend Aarav has a dog named Bruno.",
+  "We ate pani puri at the market yesterday.",
+  "My dadi makes the best aloo paratha.",
+  "I want to be an astronaut when I grow up.",
+  "Can we play cricket after school today?",
+  "The monkey climbed the mango tree very fast.",
+  "My sister Ananya lives in Nagpur.",
+  "We went to the beach and built a sandcastle.",
+  "I did not finish my homework because I was tired.",
+];
+// Whisper writes American spelling; these are spelling differences, not errors.
+const SPELLING = { favourite: "favorite", colour: "color", colours: "colors", neighbour: "neighbor", centre: "center" };
+const MIME_CHOICES = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4", "audio/webm"];
+const REC_BPS = 24000, MIN_HOLD_MS = 300;
+let stream = null, rec = null, chunks = [], mime = "", pressing = false, tDown = 0, objectUrl = "";
+let sentenceNo = 0, lastFree = null;
+const player = new Audio();
+const stats = {};  // model -> { words, errors, turns, stt: [] }
+
+const mode = () => document.querySelector('input[name="mode"]:checked').value;
+const model = () => document.querySelector('input[name="model"]:checked').value;
+function say(text, isError = false) { $("#status").textContent = text; $("#status").className = isError ? "err" : ""; }
+
+function postLog(entry) {
+  fetch("log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(entry), cache: "no-store" })
+    .then((r) => { if (!r.ok) say(`Result not saved: server answered ${r.status}`, true); })
+    .catch((e) => say(`Result not saved: ${e.name}: ${e.message}`, true));
+}
+function fail(stage, err) {
+  const text = `${stage} failed: ${err.name}: ${err.message}`;
+  say(text, true);
+  postLog({ error: text, ua: navigator.userAgent, model: model(), mode: mode() });
+}
+
+function words(t) { return t.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean).map((w) => SPELLING[w] || w); }
+function wordErrors(ref, hyp) {
+  const r = words(ref), h = words(hyp);
+  let d = Array.from({ length: h.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= r.length; i++) {
+    let prev = d[0]; d[0] = i;
+    for (let j = 1; j <= h.length; j++) {
+      const cur = d[j];
+      d[j] = Math.min(d[j] + 1, d[j - 1] + 1, prev + (r[i - 1] === h[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+  }
+  return { errors: d[h.length], refWords: r.length };
+}
+
+function showCard() {
+  const read = mode() === "read";
+  $("#card").style.display = read ? "block" : "none";
+  $("#probebox").style.display = read ? "none" : "block";
+  $("#cardhead").textContent = `Sentence ${sentenceNo + 1} of ${SENTENCES.length}: read it aloud`;
+  $("#sentence").textContent = SENTENCES[sentenceNo];
+  $("#marks").style.display = "none";
+}
+
+function summary() {
+  const lines = Object.entries(stats).map(([m, s]) => {
+    const sttSorted = [...s.stt].sort((a, b) => a - b);
+    const med = sttSorted.length ? Math.round(sttSorted[Math.floor((sttSorted.length - 1) / 2)]) : 0;
+    const wer = s.words ? Math.round((100 * s.errors) / s.words) : 0;
+    return `${m}: ${s.turns} sentences, word errors ${wer}% (${s.errors} of ${s.words} words), speech-to-text median ${med} ms`;
+  });
+  $("#summary").textContent = lines.join("\n");
+}
+
+async function start() {
+  if (!window.isSecureContext || !navigator.mediaDevices) { say("No microphone access: this page is not on HTTPS.", true); return; }
+  if (!window.MediaRecorder) { say("This browser cannot record.", true); return; }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (e) { fail("Microphone", e); return; }  // NotAllowedError, NotFoundError, NotReadableError
+  mime = MIME_CHOICES.find((m) => MediaRecorder.isTypeSupported(m)) || "";
+  $("#start").style.display = "none";
+  $("#talk").style.display = "block";
+  say("Ready. Hold the button, wait for red, then speak.");
+}
+
+function down(ev) {
+  ev.preventDefault();
+  if (!stream || pressing) return;
+  pressing = true;
+  if (ev.pointerId !== undefined && $("#talk").setPointerCapture) $("#talk").setPointerCapture(ev.pointerId);
+  chunks = [];
+  try {
+    const opts = { audioBitsPerSecond: REC_BPS };
+    if (mime) opts.mimeType = mime;
+    rec = new MediaRecorder(stream, opts);
+  } catch (e) { pressing = false; fail("Recorder", e); return; }
+  rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+  rec.onerror = (e) => fail("Recorder", e.error || e);
+  rec.start();
+  tDown = performance.now();
+  $("#talk").classList.add("on");
+  $("#heard").textContent = "";
+  $("#marks").style.display = "none";
+  say("Listening… release to send.");
+}
+
+async function up(ev) {
+  if (!pressing) return;
+  pressing = false;
+  if (!rec || rec.state !== "recording") return;
+  ev.preventDefault();
+  $("#talk").classList.remove("on");
+  const tRelease = performance.now();
+  const heldMs = tRelease - tDown;
+  const stopped = new Promise((resolve) => { rec.onstop = resolve; });
+  rec.stop();
+  await stopped;
+  if (heldMs < MIN_HOLD_MS) { say("Hold the button a little longer."); return; }
+  const blob = new Blob(chunks, { type: rec.mimeType || mime || "application/octet-stream" });
+  if (blob.size === 0) { say("The recording was empty. Try again.", true); return; }
+  const m = model(), md = mode();
+  say(`Sending to ${m}…`);
+  let resp;
+  try {
+    resp = await fetch("turn", { method: "POST", body: blob, cache: "no-store", headers: { "Content-Type": blob.type, "X-Model": m } });
+  } catch (e) { fail("Upload", e); return; }  // TypeError = network failure
+  const tHeaders = performance.now();
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "(no error text)");
+    fail("Server", { name: `HTTP ${resp.status}`, message: text.trim() });
+    return;
+  }
+  const heard = decodeURIComponent(resp.headers.get("X-Transcript") || "");
+  $("#heard").textContent = heard ? `Heard: “${heard}”` : "Heard: (nothing)";
+  let buf;
+  try { buf = await resp.arrayBuffer(); } catch (e) { fail("Download", e); return; }
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+  objectUrl = URL.createObjectURL(new Blob([buf], { type: resp.headers.get("Content-Type") || "audio/ogg" }));
+  const playing = new Promise((resolve) => player.addEventListener("playing", resolve, { once: true }));
+  player.src = objectUrl;
+  try { await player.play(); await playing; } catch (e) { fail("Playback", e); return; }  // NotAllowedError, NotSupportedError
+  const totalMs = performance.now() - tRelease;
+  const sttMs = Number(resp.headers.get("X-Stt-Ms"));
+  const entry = {
+    kind: "stt", mode: md, model: m, held_ms: heldMs, upload_bytes: blob.size,
+    request_ms: tHeaders - tRelease, total_ms: totalMs,
+    stt_ms: Number.isFinite(sttMs) ? sttMs : -1, audio_s: Number(resp.headers.get("X-Audio-S")) || -1,
+    mime: blob.type, ua: navigator.userAgent,
+  };
+  if (md === "read") {
+    const { errors, refWords } = wordErrors(SENTENCES[sentenceNo], heard);
+    Object.assign(entry, { sentence_no: sentenceNo + 1, wer: errors / refWords, ref_words: refWords });
+    const s = (stats[m] = stats[m] || { words: 0, errors: 0, turns: 0, stt: [] });
+    s.words += refWords; s.errors += errors; s.turns += 1; s.stt.push(entry.stt_ms);
+    say(`${errors} word error${errors === 1 ? "" : "s"} in ${refWords} words. Speech-to-text ${Math.round(entry.stt_ms)} ms; reply started ${Math.round(totalMs)} ms after release.`);
+    summary();
+    postLog(entry);
+  } else {
+    lastFree = { ...entry, probe: $("#probe").value };
+    $("#marks").style.display = "flex";
+    say(`Speech-to-text ${Math.round(entry.stt_ms)} ms. Did it hear you right? (For silence: right = nothing heard.)`);
+  }
+}
+
+function mark(value) {
+  if (!lastFree) return;
+  postLog({ ...lastFree, mark: value });
+  lastFree = null;
+  $("#marks").style.display = "none";
+  say(`Marked "${value}".`);
+}
+
+$("#start").addEventListener("click", start);
+$("#next").addEventListener("click", () => { sentenceNo = (sentenceNo + 1) % SENTENCES.length; showCard(); $("#heard").textContent = ""; });
+$("#ok").addEventListener("click", () => mark("right"));
+$("#bad").addEventListener("click", () => mark("wrong"));
+document.querySelectorAll('input[name="mode"]').forEach((el) => el.addEventListener("change", showCard));
+const talk = $("#talk");
+talk.addEventListener("pointerdown", down);
+talk.addEventListener("pointerup", up);
+talk.addEventListener("pointercancel", up);
+talk.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && stream) {
+    pressing = false;
+    if (rec && rec.state === "recording") rec.stop();
+    stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+    $("#talk").style.display = "none";
+    $("#start").style.display = "inline-block";
+    say("Microphone released. Press Start to go on.");
+  }
+});
+showCard();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "character": "Toffee",
+  "animal": "cat",
+  "about": "a small orange cat who loves mangoes and naps in the sun",
+  "whisper_model": "small",
+  "llm_model": "gemma4:e4b",
+  "idle_minutes": 5,
+  "session_minutes": 15
+}

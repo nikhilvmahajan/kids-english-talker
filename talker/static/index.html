@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Toffee</title>
+<style>
+  :root { --bg: #fff8ec; --fg: #3a2a1a; --muted: #8a7a6a; --orange: #f39a3d; --orange-d: #d97a1f; --pink: #f7a8b8;
+          --btn: #f39a3d; --btn-on: #e0533d; --bubble: #ffffff; --line: #ecdcc6; --gold: #f5b400; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #20180f; --fg: #f6ead8; --muted: #b7a58f; --bubble: #33271b; --line: #4a3a28; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 12px 16px 24px; background: var(--bg); color: var(--fg); overflow-x: hidden;
+         font: 18px/1.4 system-ui, sans-serif; min-height: 100vh; display: flex; flex-direction: column; align-items: center; }
+  header { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 36px; }
+  #stars { font-size: 1.3rem; font-weight: 700; color: var(--gold); display: none; transition: transform 0.25s; }
+  #stars.pop { transform: scale(1.35); }
+  #status { font-size: 0.85rem; color: var(--muted); min-height: 1.2em; text-align: center; margin: 2px 0; }
+  #status.err { color: var(--btn-on); font-weight: 600; }
+  button { font: inherit; border: 0; border-radius: 12px; padding: 10px 18px; background: var(--btn); color: #fff; }
+  button.small { padding: 6px 12px; font-size: 0.85rem; background: transparent; color: var(--muted); border: 1px solid var(--line); }
+  button.kid { background: var(--bubble); color: var(--fg); border: 2px solid var(--orange); margin: 4px;
+               -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
+  .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); display: none; align-items: center;
+           justify-content: center; z-index: 10; }
+  .sheet { background: var(--bubble); color: var(--fg); border-radius: 16px; padding: 14px; width: min(90vw, 420px);
+           display: flex; flex-direction: column; gap: 8px; max-height: 85vh; overflow-y: auto; }
+  #mtitle { font-weight: 700; font-size: 1.2rem; text-align: center; }
+  .stk { display: inline-block; padding: 4px 10px; margin: 3px; border-radius: 12px; border: 1px solid var(--gold); }
+  .stk.no { opacity: 0.35; border-style: dashed; }
+  #setup { width: min(92vw, 520px); display: flex; flex-direction: column; gap: 8px; margin: 6px 0; }
+  #kids { display: flex; flex-wrap: wrap; justify-content: center; }
+  #newkid { display: none; flex-direction: column; gap: 6px; background: var(--bubble); border: 1px solid var(--line);
+            border-radius: 14px; padding: 10px; }
+  #newkid label { font-size: 0.85rem; color: var(--muted); }
+  input, select { font: inherit; padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); width: 100%; }
+  #catbox { width: min(70vw, 330px); margin-top: 2px; position: relative; }
+  #bubble { background: var(--bubble); border: 2px solid var(--line); border-radius: 18px; padding: 12px 16px;
+            min-height: 3.2em; width: min(92vw, 520px); font-size: 1.25rem; text-align: center; margin: 4px 0;
+            transition: opacity 0.6s; }
+  #bubble.waiting { opacity: 0; }
+  #bubble.faded { opacity: 0.12; }
+  #heard { font-size: 0.8rem; color: var(--muted); min-height: 1.1em; text-align: center; }
+  #toast { position: fixed; top: 52px; left: 50%; transform: translateX(-50%); background: var(--gold); color: #3a2a1a;
+           padding: 8px 16px; border-radius: 14px; font-weight: 700; opacity: 0; transition: opacity 0.4s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+  #talk { display: none; width: 150px; height: 150px; border-radius: 50%; margin: 12px auto 0; font-size: 1.15rem;
+          touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  #talk.on { background: var(--btn-on); transform: scale(1.06); }
+  #talk:disabled { opacity: 0.5; }
+  .confetti { position: fixed; top: -30px; font-size: 26px; pointer-events: none; animation: fall 1.8s ease-in forwards; }
+  @keyframes fall { to { transform: translateY(105vh) rotate(360deg); opacity: 0.6; } }
+
+  /* ---- the cat: states are classes on #cat ---- */
+  #cat .eyelid { transform-box: fill-box; transform-origin: center top; transform: scaleY(0); animation: blink 4.5s infinite; }
+  @keyframes blink { 0%, 92%, 100% { transform: scaleY(0); } 95% { transform: scaleY(1); } }
+  #cat #tail { transform-box: fill-box; transform-origin: 0% 100%; animation: sway 2.6s ease-in-out infinite; }
+  @keyframes sway { 0%, 100% { transform: rotate(-6deg); } 50% { transform: rotate(8deg); } }
+  #cat #all { transform-box: view-box; transform-origin: 150px 290px; }
+  #cat #head { transform-box: fill-box; transform-origin: center bottom; transition: transform 0.4s; }
+  #cat .ear { transform-box: fill-box; transform-origin: center bottom; transition: transform 0.3s; }
+  #cat .pupil { transition: transform 0.3s; }
+  #cat .paw { transform-box: fill-box; transform-origin: center; }
+  #cat #mouthOpen { transform-box: fill-box; transform-origin: center top; transform: scaleY(0); }
+  #cat #happyEyes, #cat #blush, #cat #brows, #cat #dots, #cat #zzz { opacity: 0; transition: opacity 0.3s; }
+  #cat.sleeping .eyelid { transform: scaleY(1); animation: none; }
+  #cat.sleeping #zzz { opacity: 1; }
+  #cat.listening .ear { transform: scaleY(1.12); }
+  #cat.listening .pupil { transform: scale(1.15); }
+  #cat.thinking .pupil { transform: translate(3px, -5px); }
+  #cat.thinking #dots { opacity: 1; }
+  #cat.thinking #dots circle { animation: pulse 1s infinite; }
+  #cat.thinking #dots circle:nth-child(2) { animation-delay: 0.2s; }
+  #cat.thinking #dots circle:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+  #cat.talking #mouthOpen { animation: talk 0.28s ease-in-out infinite alternate; }
+  @keyframes talk { from { transform: scaleY(0.15); } to { transform: scaleY(1); } }
+  #cat.happy #eyes, #cat.celebrate #eyes { opacity: 0; }
+  #cat.happy #happyEyes, #cat.happy #blush, #cat.celebrate #happyEyes, #cat.celebrate #blush { opacity: 1; }
+  #cat.curious #head { transform: rotate(-8deg); }
+  #cat.curious #earR { transform: rotate(12deg) scaleY(0.9); }
+  #cat.gentle #brows { opacity: 1; }
+  #cat.gentle .pupil { transform: translateY(2px) scale(0.9); }
+  #cat.gentle #tail { animation-duration: 4.5s; }
+  #cat.celebrate #all { animation: jump 0.5s ease-in-out 3; }
+  @keyframes jump { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-22px); } }
+  #cat.celebrate #pawL { animation: clapL 0.25s ease-in-out 6 alternate; }
+  #cat.celebrate #pawR { animation: clapR 0.25s ease-in-out 6 alternate; }
+  @keyframes clapL { to { transform: translate(22px, -38px); } }
+  @keyframes clapR { to { transform: translate(-22px, -38px); } }
+</style>
+</head>
+<body>
+<header>
+  <div id="stars">⭐ 0</div>
+  <button class="small" id="end" style="display:none">End</button>
+</header>
+
+<div id="setup">
+  <div style="text-align:center;color:var(--muted)">Who is playing?</div>
+  <div id="kids"></div>
+  <button class="small" id="addkid">+ New child</button>
+  <div id="newkid">
+    <label>Child's name <input id="kname" maxlength="20" autocomplete="off"></label>
+    <label>Age <select id="kage"><option value="">choose</option><option>5</option><option>6</option><option>7</option>
+      <option>8</option><option>9</option><option>10</option><option>11</option></select></label>
+    <label>English level <select id="klevel"><option value="">choose</option>
+      <option value="starting">Just starting (a few words)</option>
+      <option value="beginner">Beginner (simple words, short sentences)</option>
+      <option value="growing">Growing (talks in short sentences)</option></select></label>
+    <label>Family words (optional) <input id="kfamily" maxlength="60" placeholder="Aai or Baba, or Grandma or Grandpa"></label>
+    <button id="kstart">Start</button>
+  </div>
+</div>
+
+<div id="catbox">
+<svg id="cat" class="sleeping" viewBox="0 0 300 300" role="img" aria-label="Toffee the cat">
+ <g id="all">
+  <path id="tail" d="M215 250 C 270 245, 285 190, 255 160" fill="none" stroke="var(--orange-d)" stroke-width="18" stroke-linecap="round"/>
+  <ellipse cx="150" cy="235" rx="78" ry="55" fill="var(--orange)"/>
+  <ellipse cx="150" cy="248" rx="42" ry="34" fill="#ffe2bf"/>
+  <ellipse cx="115" cy="285" rx="20" ry="11" fill="var(--orange-d)"/>
+  <ellipse cx="185" cy="285" rx="20" ry="11" fill="var(--orange-d)"/>
+  <ellipse class="paw" id="pawL" cx="110" cy="232" rx="15" ry="13" fill="var(--orange-d)"/>
+  <ellipse class="paw" id="pawR" cx="190" cy="232" rx="15" ry="13" fill="var(--orange-d)"/>
+  <g id="head">
+    <g class="ear" id="earL"><path d="M72 95 L88 25 L135 70 Z" fill="var(--orange)"/><path d="M84 82 L93 42 L121 70 Z" fill="var(--pink)"/></g>
+    <g class="ear" id="earR"><path d="M228 95 L212 25 L165 70 Z" fill="var(--orange)"/><path d="M216 82 L207 42 L179 70 Z" fill="var(--pink)"/></g>
+    <ellipse cx="150" cy="118" rx="88" ry="74" fill="var(--orange)"/>
+    <path d="M150 50 l-8 22 M150 50 l8 22 M150 50 v26" stroke="var(--orange-d)" stroke-width="5" stroke-linecap="round"/>
+    <ellipse cx="150" cy="150" rx="46" ry="30" fill="#ffe2bf"/>
+    <g id="eyes">
+      <ellipse cx="114" cy="115" rx="17" ry="20" fill="#fff"/>
+      <ellipse cx="186" cy="115" rx="17" ry="20" fill="#fff"/>
+      <g class="pupil"><circle cx="116" cy="118" r="10" fill="#2b1d10"/><circle cx="120" cy="112" r="3.5" fill="#fff"/></g>
+      <g class="pupil"><circle cx="184" cy="118" r="10" fill="#2b1d10"/><circle cx="188" cy="112" r="3.5" fill="#fff"/></g>
+      <rect class="eyelid" x="96" y="94" width="36" height="42" rx="16" fill="var(--orange)"/>
+      <rect class="eyelid" x="168" y="94" width="36" height="42" rx="16" fill="var(--orange)"/>
+    </g>
+    <g id="happyEyes" fill="none" stroke="#2b1d10" stroke-width="5" stroke-linecap="round">
+      <path d="M100 120 Q114 102 128 120"/><path d="M172 120 Q186 102 200 120"/>
+    </g>
+    <g id="brows" stroke="#2b1d10" stroke-width="4" stroke-linecap="round"><path d="M100 92 L126 98"/><path d="M200 92 L174 98"/></g>
+    <g id="blush" fill="var(--pink)" opacity="0.8"><ellipse cx="96" cy="148" rx="13" ry="7"/><ellipse cx="204" cy="148" rx="13" ry="7"/></g>
+    <path d="M142 140 L158 140 L150 149 Z" fill="#e5707f"/>
+    <path d="M150 149 Q150 158 140 160 M150 149 Q150 158 160 160" fill="none" stroke="#2b1d10" stroke-width="3" stroke-linecap="round"/>
+    <ellipse id="mouthOpen" cx="150" cy="166" rx="11" ry="9" fill="#7a2e2e"/>
+    <g stroke="#2b1d10" stroke-width="2" stroke-linecap="round" opacity="0.7">
+      <path d="M118 150 L72 142"/><path d="M118 156 L70 160"/><path d="M182 150 L228 142"/><path d="M182 156 L230 160"/>
+    </g>
+    <g id="dots" fill="var(--muted)"><circle cx="232" cy="52" r="6"/><circle cx="250" cy="36" r="7"/><circle cx="270" cy="20" r="8"/></g>
+    <g id="zzz" fill="var(--muted)" font-size="22" font-weight="700"><text x="225" y="60">z</text><text x="242" y="42">z</text><text x="260" y="24">Z</text></g>
+  </g>
+ </g>
+</svg>
+</div>
+
+<div id="status"></div>
+<div id="bubble">Who is playing today?</div>
+<div id="heard"></div>
+<button id="talk" disabled>Hold to talk</button>
+<div id="toast"></div>
+<div id="menu" class="modal"><div class="sheet">
+  <div id="mtitle"></div>
+  <div id="mbody"></div>
+  <button id="mstickers">Stars and stickers</button>
+  <button class="small" id="mdelete">Delete profile…</button>
+  <button class="small" id="mclose">Close</button>
+</div></div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const MIME_CHOICES = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4", "audio/webm"];
+const REC_BPS = 24000, MIN_HOLD_MS = 300, FADE_AFTER_MS = 4000;
+const players = [new Audio(), new Audio()];  // take turns: one plays, the other loads the next sentence
+let stream = null, rec = null, chunks = [], mime = "", pressing = false, tDown = 0, busy = false;
+let feelingTimer = null, fadeTimer = null, toastTimer = null, childName = "";
+
+function say(text, isError = false) { $("#status").textContent = text; $("#status").className = isError ? "err" : ""; }
+function cat(state) { $("#cat").setAttribute("class", state); }
+
+async function api(path, opts = {}) {
+  let r;
+  try { r = await fetch(path, { cache: "no-store", ...opts }); }
+  catch (e) { throw new Error(`network: ${e.name}`); }  // TypeError = no connection
+  let data = {};
+  try { data = await r.json(); } catch (e) { data = { error: `bad answer (${r.status})` }; }
+  if (!r.ok) throw new Error(data.error || `error ${r.status}`);
+  return data;
+}
+
+function postLog(entry) {
+  fetch("log", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(entry) })
+    .then((r) => { if (!r.ok) say(`Timings not saved (${r.status})`, true); })
+    .catch((e) => say(`Timings not saved: ${e.name}`, true));
+}
+
+function silentWavUrl() {
+  const n = 800, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVEfmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 8000, true);
+  v.setUint32(28, 16000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, n * 2, true);
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+
+function setStars(total, added = 0) {
+  const el = $("#stars");
+  el.style.display = "block";
+  el.textContent = `⭐ ${total}`;
+  if (added > 0) { el.classList.add("pop"); setTimeout(() => el.classList.remove("pop"), 300); }
+}
+
+function toast(text) {
+  const t = $("#toast");
+  t.textContent = text;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+function confetti() {
+  for (let i = 0; i < 14; i++) {
+    const s = document.createElement("div");
+    s.className = "confetti";
+    s.textContent = "⭐";
+    s.style.left = `${Math.random() * 92}vw`;
+    s.style.animationDelay = `${Math.random() * 0.6}s`;
+    document.body.appendChild(s);
+    setTimeout(() => s.remove(), 2600);
+  }
+}
+
+// ---- setup: who is playing? -------------------------------------------------------
+async function loadProfiles() {
+  try {
+    const st = await api("status");
+    const r = await api("profiles");
+    const box = $("#kids");
+    box.textContent = "";
+    r.profiles.forEach((p) => {
+      const b = document.createElement("button");
+      b.className = "kid";
+      b.textContent = `${p.name}  ⭐ ${p.stars}`;
+      longPress(b, () => start({ name: p.name }), () => openMenu(p.name));
+      box.appendChild(b);
+    });
+    if (!r.profiles.length) $("#newkid").style.display = "flex";
+    if (st.state === "on" && st.child) say(`Toffee is talking with ${st.child}. Tap their name to go on.`);
+  } catch (e) { say(`Cannot reach Toffee: ${e.message}`, true); }
+}
+
+// ---- long press on a name: stars and stickers, delete ----------------------------
+function longPress(el, onTap, onLong, ms = 600) {
+  let timer = null, fired = false;
+  const fire = () => { if (!fired) { fired = true; clearTimeout(timer); onLong(); } };
+  el.addEventListener("pointerdown", () => { fired = false; timer = setTimeout(fire, ms); });
+  ["pointerup", "pointerleave", "pointercancel"].forEach((t) => el.addEventListener(t, () => clearTimeout(timer)));
+  el.addEventListener("contextmenu", (e) => { e.preventDefault(); fire(); });  // Android's own long press
+  el.addEventListener("click", (e) => { if (fired) { e.preventDefault(); return; } onTap(); });
+}
+
+let menuName = "";
+function openMenu(name) {
+  menuName = name;
+  $("#mtitle").textContent = name;
+  $("#mbody").textContent = "";
+  $("#menu").style.display = "flex";
+}
+function closeMenu() { $("#menu").style.display = "none"; menuName = ""; }
+
+async function showStickers() {
+  const body = $("#mbody");
+  body.textContent = "Loading…";
+  try {
+    const d = await api(`profile?name=${encodeURIComponent(menuName)}`);
+    body.textContent = "";
+    const line = document.createElement("div");
+    line.textContent = `⭐ ${d.stars} stars · ${d.words} words spoken · ${d.days_played} day${d.days_played === 1 ? "" : "s"} played`;
+    body.appendChild(line);
+    const box = document.createElement("div");
+    d.stickers.forEach((st) => {
+      const span = document.createElement("span");
+      span.className = st.earned ? "stk" : "stk no";
+      span.textContent = (st.earned ? "✓ " : "") + st.title;
+      box.appendChild(span);
+    });
+    body.appendChild(box);
+  } catch (e) { body.textContent = e.message; }
+}
+
+async function deleteProfile() {
+  const name = menuName;
+  const typed = prompt(`This deletes ${name}'s stars and stickers for ever.\nTo confirm, type the name: ${name}`);
+  if (typed === null) return;  // cancelled
+  if (typed.trim().toLowerCase() !== name.toLowerCase()) { $("#mbody").textContent = "The name did not match. Nothing was deleted."; return; }
+  try {
+    await api("delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    closeMenu();
+    say(`${name}'s profile was deleted.`);
+    loadProfiles();
+  } catch (e) { $("#mbody").textContent = e.message; }
+}
+
+function newKidStart() {
+  const name = $("#kname").value.trim(), age = Number($("#kage").value), level = $("#klevel").value;
+  if (!name) { say("Please type the child's name.", true); return; }
+  if (!age) { say("Please choose the age.", true); return; }
+  if (!level) { say("Please choose the English level.", true); return; }
+  const family = $("#kfamily").value.trim();
+  start({ name, age, level, ...(family ? { grown_ups: family } : {}) });
+}
+
+// ---- start and end ----------------------------------------------------------------
+async function start(req) {
+  if (!window.isSecureContext || !navigator.mediaDevices || !window.MediaRecorder) {
+    say("This page needs HTTPS and a browser that can record.", true); return;
+  }
+  document.querySelectorAll("#setup button").forEach((b) => (b.disabled = true));
+  try {
+    const silent = silentWavUrl();
+    for (const p of players) { p.src = silent; await p.play(); }  // unlock both during the tap
+  } catch (e) { say(`Audio blocked: ${e.name}`, true); enableSetup(); return; }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (e) { say(`Microphone: ${e.name}`, true); enableSetup(); return; }  // NotAllowedError, NotFoundError
+  mime = MIME_CHOICES.find((m) => MediaRecorder.isTypeSupported(m)) || "";
+  say("Toffee is waking up…");
+  $("#bubble").textContent = "Yawn… one moment…";
+  $("#bubble").className = "";
+  let r;
+  try {
+    r = await api("start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req) });
+  } catch (e) {
+    say(e.message, true);
+    $("#bubble").textContent = "Toffee is still sleeping.";
+    releaseMic();
+    enableSetup();
+    return;
+  }
+  childName = r.profile.name;
+  setStars(r.profile.stars, r.stars_added || 0);
+  $("#setup").style.display = "none";
+  $("#end").style.display = "inline-block";
+  $("#talk").style.display = "block";
+  say(r.start_ms ? `Awake in ${(r.start_ms / 1000).toFixed(0)} s.` : "");
+  if (r.stars_added) toast(`Welcome back! +${r.stars_added} ⭐`);
+  if (r.greet) {
+    busy = true;
+    $("#talk").disabled = true;
+    await playVoice(r.greet, "happy", true);
+  }
+  busy = false;
+  $("#talk").disabled = false;
+}
+
+function enableSetup() { document.querySelectorAll("#setup button").forEach((b) => (b.disabled = false)); }
+function releaseMic() { if (stream) stream.getTracks().forEach((t) => t.stop()); stream = null; }
+
+async function end(sleepy = false) {
+  $("#talk").disabled = true;
+  say("Toffee is going to sleep…");
+  releaseMic();
+  let r = null;
+  try { r = await api("end", { method: "POST" }); }
+  catch (e) { say(`End: ${e.message}`, true); }
+  cat("sleeping");
+  const s = r && r.summary;
+  $("#bubble").className = "";
+  $("#bubble").textContent = s
+    ? `${sleepy ? "Zzz… " : "Bye bye! "}Today ${s.name} said ${s.words} words and got ${s.stars} ⭐` +
+      (s.stickers.length ? ` and ${s.stickers.length} new sticker${s.stickers.length > 1 ? "s" : ""}: ${s.stickers.join(", ")}` : "") +
+      `. Next time, tell Toffee about ${s.next_topic}!`
+    : "Bye bye! See you soon!";
+  if (r) say(r.gpu_freed === false ? "Asleep, but the GPU is still busy. Check the desktop." : "Asleep. The computer is free again.", r.gpu_freed === false);
+  $("#heard").textContent = "";
+  $("#talk").style.display = "none";
+  $("#end").style.display = "none";
+  $("#setup").style.display = "flex";
+  $("#newkid").style.display = "none";
+  enableSetup();
+  loadProfiles();
+}
+
+// ---- playing Toffee's voice, sentence by sentence ---------------------------------
+async function playVoice(voice, feeling, keepWords) {
+  const bubble = $("#bubble");
+  bubble.textContent = "";
+  bubble.className = "waiting";
+  clearTimeout(fadeTimer);
+  cat(`${feeling} thinking`);
+  let tSound = 0;
+  for (let i = 0; i < voice.parts.length; i++) {
+    const el = players[i % 2];
+    if (i === 0) el.src = `audio/${voice.id}/0`;
+    const playing = new Promise((resolve) => el.addEventListener("playing", resolve, { once: true }));
+    const ended = new Promise((resolve, reject) => {
+      el.addEventListener("ended", resolve, { once: true });
+      el.addEventListener("error", () => reject(new Error(el.error ? `code ${el.error.code}` : "error")), { once: true });
+    });
+    ended.catch(() => {});  // awaited below; this only stops an "unhandled" warning if we break early
+    try { await el.play(); await playing; }
+    catch (e) { say(`Voice: ${e.name || e.message}`, true); break; }  // NotAllowedError, NotSupportedError
+    if (i === 0) tSound = performance.now();
+    bubble.textContent += (i ? " " : "") + voice.parts[i];   // words appear as Toffee says them
+    bubble.className = "";
+    cat(`${feeling} talking`);
+    if (i + 1 < voice.parts.length) {
+      const nx = players[(i + 1) % 2];
+      nx.src = `audio/${voice.id}/${i + 1}`;
+      nx.preload = "auto";
+      nx.load();
+    }
+    try { await ended; }
+    catch (e) { say(`Voice stopped: ${e.message}`, true); break; }  // MEDIA_ERR codes from the element
+  }
+  if (bubble.className === "waiting") { bubble.textContent = voice.parts.join(" "); bubble.className = ""; }
+  cat(feeling);
+  feelingTimer = setTimeout(() => { if (!pressing && !busy) cat(""); }, 2500);
+  if (!keepWords) fadeTimer = setTimeout(() => { if (!busy) bubble.className = "faded"; }, FADE_AFTER_MS);
+  return tSound;
+}
+
+// ---- one turn -----------------------------------------------------------------------
+function down(ev) {
+  ev.preventDefault();
+  if (!stream || pressing || busy) return;
+  pressing = true;
+  if (ev.pointerId !== undefined && $("#talk").setPointerCapture) $("#talk").setPointerCapture(ev.pointerId);
+  clearTimeout(fadeTimer);
+  chunks = [];
+  try {
+    const opts = { audioBitsPerSecond: REC_BPS };
+    if (mime) opts.mimeType = mime;
+    rec = new MediaRecorder(stream, opts);
+  } catch (e) { pressing = false; say(`Recorder: ${e.name}`, true); return; }
+  rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+  rec.onerror = (e) => say(`Recorder: ${(e.error || e).name}`, true);
+  rec.start();
+  tDown = performance.now();
+  $("#talk").classList.add("on");
+  clearTimeout(feelingTimer);
+  cat("listening");
+}
+
+async function up(ev) {
+  if (!pressing) return;
+  pressing = false;
+  if (!rec || rec.state !== "recording") return;
+  ev.preventDefault();
+  $("#talk").classList.remove("on");
+  const tRelease = performance.now(), heldMs = tRelease - tDown;
+  const stopped = new Promise((resolve) => { rec.onstop = resolve; });
+  rec.stop();
+  await stopped;
+  if (heldMs < MIN_HOLD_MS) { cat("curious"); $("#bubble").className = ""; $("#bubble").textContent = "Hold the button while you talk!"; return; }
+  const blob = new Blob(chunks, { type: rec.mimeType || mime || "application/octet-stream" });
+  if (blob.size === 0) { say("The recording was empty.", true); return; }
+  busy = true;
+  $("#talk").disabled = true;
+  cat("thinking");
+  let r;
+  try { r = await api("turn", { method: "POST", body: blob, headers: { "Content-Type": blob.type } }); }
+  catch (e) {
+    say(e.message, true); cat("curious"); busy = false; $("#talk").disabled = false;
+    if (e.message.includes("Start")) end();
+    return;
+  }
+  const tReply = performance.now();
+  say("");
+  $("#heard").textContent = r.heard ? `I heard: “${r.heard}”` : "I heard: (nothing)";
+  setStars(r.stars_total, r.stars_added);
+  const tSound = await playVoice(r, r.feeling || "happy", r.support);
+  if (r.celebrate) { cat("celebrate"); confetti(); setTimeout(() => cat(""), 1700); }
+  if (r.new_stickers && r.new_stickers.length) toast(`New sticker: ${r.new_stickers.join(", ")}!`);
+  if (tSound) postLog({ total_ms: tSound - tRelease, request_ms: tReply - tRelease, audio_wait_ms: tSound - tReply,
+                        held_ms: heldMs, upload_bytes: blob.size });
+  busy = false;
+  if (r.bye) { await end(true); return; }
+  $("#talk").disabled = false;
+}
+
+$("#mstickers").addEventListener("click", showStickers);
+$("#mdelete").addEventListener("click", deleteProfile);
+$("#mclose").addEventListener("click", closeMenu);
+$("#menu").addEventListener("click", (e) => { if (e.target.id === "menu") closeMenu(); });
+$("#addkid").addEventListener("click", () => { $("#newkid").style.display = "flex"; $("#kname").focus(); });
+$("#kstart").addEventListener("click", newKidStart);
+$("#end").addEventListener("click", () => end(false));
+$("#bubble").addEventListener("click", () => { clearTimeout(fadeTimer); if ($("#bubble").className === "faded") $("#bubble").className = ""; });
+const talk = $("#talk");
+talk.addEventListener("pointerdown", down);
+talk.addEventListener("pointerup", up);
+talk.addEventListener("pointercancel", up);
+talk.addEventListener("contextmenu", (e) => e.preventDefault());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && stream) {
+    pressing = false;
+    if (rec && rec.state === "recording") rec.stop();
+    releaseMic();
+    $("#talk").style.display = "none";
+    $("#setup").style.display = "flex";
+    enableSetup();
+    loadProfiles();
+    say("Microphone off. Tap the name to go on. Toffee sleeps by itself after a few quiet minutes.");
+  }
+});
+loadProfiles();
+</script>
+</body>
+</html>

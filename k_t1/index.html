@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K-T1 round trip</title>
+<style>
+  :root { --bg: #f7f5f0; --fg: #222; --muted: #666; --btn: #e8833a; --btn-on: #c4442a; --line: #ddd; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1b1d; --fg: #eee; --muted: #aaa; --btn: #e8833a; --btn-on: #ff6b4a; --line: #333; }
+  }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+         font: 16px/1.4 system-ui, sans-serif; }
+  h1 { font-size: 1.1rem; margin: 0 0 12px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; padding: 6px 10px; }
+  legend { font-size: 0.85rem; color: var(--muted); }
+  label { display: block; padding: 4px 0; }
+  #status { min-height: 3em; margin: 12px 0; }
+  #status.err { color: var(--btn-on); font-weight: 600; }
+  button { font: inherit; }
+  #start { padding: 12px 20px; border-radius: 8px; border: 0; background: var(--btn); color: #fff; }
+  #talk { display: none; width: 180px; height: 180px; margin: 16px auto; border-radius: 50%;
+          border: 0; background: var(--btn); color: #fff; font-size: 1.2rem;
+          touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  #talk.on { background: var(--btn-on); transform: scale(1.05); }
+  .wrap { text-align: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin-top: 12px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 4px 2px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  #summary { font-weight: 600; margin-top: 8px; }
+  .note { color: var(--muted); font-size: 0.85rem; }
+  a { color: var(--btn); }
+</style>
+</head>
+<body>
+<h1>K-T1: phone → desktop → phone</h1>
+<p class="note">Hold the button until it turns red, say a short sentence, release. A fixed voice answers.
+Your audio is counted and thrown away on the desktop. Only the timings are saved.</p>
+<fieldset>
+  <legend>Plain player test: play this before you press Start (microphone closed)</legend>
+  <audio controls preload="none" src="reply.ogg" style="width: 100%"></audio>
+</fieldset>
+
+<fieldset>
+  <legend>Microphone between turns</legend>
+  <label><input type="radio" name="mic" value="open" checked> Open (A: chosen)</label>
+  <label><input type="radio" name="mic" value="closed"> Closed (B: open on press, close on release)</label>
+</fieldset>
+<fieldset>
+  <legend>How the reply plays</legend>
+  <label><input type="radio" name="play" value="webaudio-low"> Web Audio, low delay (1)</label>
+  <label><input type="radio" name="play" value="webaudio-playback"> Web Audio, larger buffer (2)</label>
+  <label><input type="radio" name="play" value="element" checked> Audio element (3: chosen)</label>
+</fieldset>
+
+<div class="wrap">
+  <button id="start">Start (allow the microphone)</button>
+  <button id="talk">Hold to talk</button>
+</div>
+<div id="status"></div>
+<div id="summary"></div>
+<table id="results" hidden>
+  <thead><tr><th>#</th><th>mode</th><th>total ms</th><th>request ms</th><th>download ms</th><th>upload KB</th></tr></thead>
+  <tbody></tbody>
+</table>
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const MIME_CHOICES = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4", "audio/webm"];
+const MIN_HOLD_MS = 300;
+const REC_BPS = 24000;  // speech needs far less than the browser default
+const MODE_CODE = { "open": "A", "closed": "B", "webaudio-low": "1", "webaudio-playback": "2", "element": "3" };
+let stream = null, ctx = null, ctxHint = "", rec = null, chunks = [], mime = "";
+let pressing = false, tDown = 0, micOpenMs = 0, objectUrl = "";
+const player = new Audio();
+const results = [];
+
+function micMode() { return document.querySelector('input[name="mic"]:checked').value; }
+function playMode() { return document.querySelector('input[name="play"]:checked').value; }
+
+function say(text, isError = false) {
+  const el = $("#status");
+  el.textContent = text;
+  el.className = isError ? "err" : "";
+}
+
+function postLog(entry) {
+  fetch("log", { method: "POST", headers: { "Content-Type": "application/json" },
+                 body: JSON.stringify(entry), cache: "no-store" })
+    .then((r) => { if (!r.ok) say(`Timings not saved: server answered ${r.status}`, true); })
+    .catch((e) => say(`Timings not saved: ${e.name}: ${e.message}`, true));
+}
+
+function fail(stage, err) {
+  const text = `${stage} failed: ${err.name}: ${err.message}`;
+  say(text, true);
+  postLog({ error: text, ua: navigator.userAgent, mic_mode: micMode(), play_mode: playMode() });
+}
+
+function silentWavUrl() {
+  // 0.1 s of silence, 8 kHz, 16-bit mono, to unlock the audio element during a tap
+  const n = 800, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVEfmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 8000, true);
+  v.setUint32(28, 16000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, n * 2, true);
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+
+async function makeContext() {
+  // Called only from a tap or a radio change, so the browser lets it start.
+  const hint = playMode() === "webaudio-playback" ? "playback" : "interactive";
+  if (ctx && ctxHint === hint) { await ctx.resume(); return; }
+  if (ctx) await ctx.close();
+  ctx = new AudioContext({ latencyHint: hint });
+  ctxHint = hint;
+  await ctx.resume();
+}
+
+async function openMic() {
+  const t0 = performance.now();
+  stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  micOpenMs = performance.now() - t0;
+}
+
+function closeMic() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = null;
+}
+
+async function start() {
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    say("No microphone access: this page is not on HTTPS (or localhost).", true);
+    return;
+  }
+  if (!window.MediaRecorder) {
+    say("This browser has no MediaRecorder, so it cannot record.", true);
+    return;
+  }
+  try { await makeContext(); } catch (e) { fail("Audio output", e); return; }
+  try {
+    player.src = silentWavUrl();
+    await player.play();
+  } catch (e) { fail("Audio element unlock", e); return; }  // NotAllowedError = autoplay blocked
+  try { await openMic(); } catch (e) {
+    // NotAllowedError = permission refused; NotFoundError = no microphone; NotReadableError = microphone busy
+    fail("Microphone", e); return;
+  }
+  if (micMode() === "closed") closeMic();
+  mime = MIME_CHOICES.find((m) => MediaRecorder.isTypeSupported(m)) || "";
+  $("#start").style.display = "none";
+  $("#talk").style.display = "block";
+  say(`Ready. Recording format: ${mime || "browser default"}.`);
+}
+
+async function down(ev) {
+  ev.preventDefault();
+  if (pressing || (rec && rec.state === "recording")) return;
+  pressing = true;
+  if (ev.pointerId !== undefined && $("#talk").setPointerCapture) $("#talk").setPointerCapture(ev.pointerId);
+  try { await makeContext(); } catch (e) { pressing = false; fail("Audio output", e); return; }
+  micOpenMs = 0;
+  if (!stream) {
+    try { await openMic(); } catch (e) { pressing = false; fail("Microphone", e); return; }
+  }
+  if (!pressing) {  // released before the microphone was ready
+    if (micMode() === "closed") closeMic();
+    say("Hold the button until it turns red, then speak.");
+    return;
+  }
+  chunks = [];
+  try {
+    const opts = { audioBitsPerSecond: REC_BPS };
+    if (mime) opts.mimeType = mime;
+    rec = new MediaRecorder(stream, opts);
+  } catch (e) { pressing = false; fail("Recorder", e); return; }
+  rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+  rec.onerror = (e) => fail("Recorder", e.error || e);
+  rec.start();
+  tDown = performance.now();
+  $("#talk").classList.add("on");
+  say("Listening… release to send.");
+}
+
+async function playReply(buf, type) {
+  // Returns { tStart, outMs, decodeMs } at the moment the first sound is due.
+  if (playMode() === "element") {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    objectUrl = URL.createObjectURL(new Blob([buf], { type }));
+    const playing = new Promise((resolve) => player.addEventListener("playing", resolve, { once: true }));
+    player.src = objectUrl;
+    await player.play();  // NotAllowedError = autoplay blocked; NotSupportedError = bad audio
+    await playing;
+    return { tStart: performance.now(), outMs: 0, decodeMs: 0 };
+  }
+  const t0 = performance.now();
+  const audio = await ctx.decodeAudioData(buf);  // EncodingError = bad audio
+  const decodeMs = performance.now() - t0;
+  const src = ctx.createBufferSource();
+  src.buffer = audio;
+  src.connect(ctx.destination);
+  src.start();
+  return { tStart: performance.now(), outMs: ((ctx.outputLatency || 0) + (ctx.baseLatency || 0)) * 1000, decodeMs };
+}
+
+async function up(ev) {
+  if (!pressing) return;
+  pressing = false;
+  if (!rec || rec.state !== "recording") return;  // down() handles the early release
+  ev.preventDefault();
+  $("#talk").classList.remove("on");
+  const tRelease = performance.now();
+  const heldMs = tRelease - tDown;
+  const stopped = new Promise((resolve) => { rec.onstop = resolve; });
+  rec.stop();
+  await stopped;
+  if (micMode() === "closed") closeMic();
+  const tBlob = performance.now();
+  if (heldMs < MIN_HOLD_MS) { say("Hold the button a little longer."); return; }
+  const blob = new Blob(chunks, { type: rec.mimeType || mime || "application/octet-stream" });
+  if (blob.size === 0) { say("The recording was empty. Try again.", true); return; }
+
+  say("Sending…");
+  let resp;
+  try {
+    resp = await fetch("turn", { method: "POST", body: blob, cache: "no-store",
+                                 headers: { "Content-Type": blob.type } });
+  } catch (e) { fail("Upload", e); return; }   // TypeError = network failure
+  const tHeaders = performance.now();
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "(no error text)");
+    fail("Server", { name: `HTTP ${resp.status}`, message: text.trim() });
+    return;
+  }
+  let buf;
+  try { buf = await resp.arrayBuffer(); } catch (e) { fail("Download", e); return; }
+  const tBody = performance.now();
+  const replyBytes = buf.byteLength;
+  let p;
+  try { p = await playReply(buf, resp.headers.get("Content-Type") || "audio/ogg"); } catch (e) { fail("Playback", e); return; }
+  const serverMs = Number(resp.headers.get("X-Server-Ms"));
+
+  const r = {
+    held_ms: heldMs, encode_ms: tBlob - tRelease, upload_bytes: blob.size,
+    request_ms: tHeaders - tBlob, server_ms: Number.isFinite(serverMs) ? serverMs : -1,
+    download_ms: tBody - tHeaders, reply_bytes: replyBytes, decode_ms: p.decodeMs,
+    output_latency_ms: p.outMs, total_ms: p.tStart - tRelease + p.outMs, mic_open_ms: micOpenMs, rec_bps: REC_BPS,
+    mic_mode: micMode(), play_mode: playMode(), mime: blob.type, ua: navigator.userAgent,
+  };
+  results.push(r);
+  render();
+  postLog(r);
+  say(`Reply started ${Math.round(r.total_ms)} ms after release. Mode ${MODE_CODE[r.mic_mode]}${MODE_CODE[r.play_mode]}.`);
+}
+
+function render() {
+  const body = $("#results tbody");
+  body.textContent = "";
+  results.forEach((r, i) => {
+    const tr = document.createElement("tr");
+    const cells = [i + 1, MODE_CODE[r.mic_mode] + MODE_CODE[r.play_mode],
+                   Math.round(r.total_ms), Math.round(r.request_ms), Math.round(r.download_ms),
+                   Math.round(r.upload_bytes / 1024)];
+    cells.forEach((v) => { const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); });
+    body.appendChild(tr);
+  });
+  $("#results").hidden = false;
+  const totals = results.map((r) => r.total_ms).sort((a, b) => a - b);
+  const median = totals[Math.floor((totals.length - 1) / 2)];
+  $("#summary").textContent = `${results.length} turns. Median total: ${Math.round(median)} ms. Worst: ${Math.round(totals[totals.length - 1])} ms.`;
+}
+
+function pause() {
+  pressing = false;
+  if (rec && rec.state === "recording") rec.stop();
+  closeMic();
+  $("#talk").classList.remove("on");
+  $("#talk").style.display = "none";
+  $("#start").style.display = "inline-block";
+  say("Microphone released. Press Start to go on.");
+}
+
+$("#start").addEventListener("click", start);
+const talk = $("#talk");
+talk.addEventListener("pointerdown", down);
+talk.addEventListener("pointerup", up);
+talk.addEventListener("pointercancel", up);
+talk.addEventListener("contextmenu", (e) => e.preventDefault());
+document.querySelectorAll('input[name="mic"]').forEach((el) => el.addEventListener("change", () => {
+  if (micMode() === "closed") closeMic();
+  else if (!stream && $("#start").style.display === "none") openMic().catch((e) => fail("Microphone", e));
+}));
+document.querySelectorAll('input[name="play"]').forEach((el) => el.addEventListener("change", () => {
+  if (ctx) makeContext().catch((e) => fail("Audio output", e));
+}));
+document.addEventListener("visibilitychange", () => { if (document.hidden && (stream || pressing)) pause(); });
+</script>
+</body>
+</html>
