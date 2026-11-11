@@ -8,7 +8,8 @@ user's own devices to 127.0.0.1:8765 (K-D4).
   GET  /status       session state and the current child's name
   GET  /profiles     the children's names and stars
   GET  /profile?name=  one child's stars, counts and all stickers (earned or not yet)
-  POST /delete       {"name"}  delete a child's profile (not while that child is playing)
+  POST /delete       {"name"}  delete a child's profile and saved talks (not while that child is playing)
+  POST /level        {"name", "level"}  change a child's English level (not while that child is playing)
   POST /start        {"name", "age", "level", "grown_ups"} (age and level for a new child)
                      check the GPU (K-D6), start the services, load Gemma; Toffee greets
   POST /turn         body: recorded audio. Speech-to-text, Gemma, code checks
@@ -20,16 +21,22 @@ user's own devices to 127.0.0.1:8765 (K-D4).
 
 Profiles (K-D12): profiles.json (mode 600; previous version in profiles.json.bak; tests use
 TALKER_PROFILES=<other file>) keeps each child's name, age, level, family words,
-stars, counts, days played, stickers and the next topic. Never audio, never what the child said.
+stars, counts, days played, stickers, the next topic, Toffee's recent topic ideas and the short
+names of topics from earlier days (past_topics; made by Gemma at End). Never audio, never the
+child's sentences (those go only to talks/, below).
 
-Privacy (K-P6): no audio and no words are stored or printed. log.jsonl gets numbers
-and the names of the checks that acted, never text. The session's talk history is
-kept in memory only and dropped at "End".
+Saved talk (K-D14): each session's talk is written as plain text to talks/<child>/<date_time>.txt
+(folder mode 700, file mode 600; tests use TALKER_TALKS=<other folder>), so parents can read it
+back. Every child plays with a parent's consent. Deleting a profile deletes its saved talks.
+
+Privacy (K-P6): no audio is stored. The developer never reads the saved talk. log.jsonl and the
+service journal get numbers and the names of the checks that acted, never words.
 
 Run:  python3 web.py
 """
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -57,7 +64,10 @@ STATIC = {"/manifest.webmanifest": "application/manifest+json", "/icon.svg": "im
           "/icon-192.png": "image/png", "/icon-512.png": "image/png"}
 MAX_UPLOAD = 5 * 1024 * 1024
 BIG_APP_MIB, NEED_FREE_MIB = 500, 9000
-HISTORY_MESSAGES = 12
+# The whole session's talk, up to 40 turns (user, 2026-11-11). With only 12 messages (6 turns), Toffee forgot
+# what it had asked and asked again; real sessions ran up to 28 turns. Test 2026-11-11 (k_t4/level_topic_test.py):
+# repeated questions 15 -> 1 in 100 turns, no slower; 25 turns gave a 1,709-token prompt (num_ctx is 4096).
+HISTORY_MESSAGES = 80
 START_TIMEOUT_S, RELEASE_TIMEOUT_S = 150, 30
 LLM_OPTIONS = {"temperature": 0.7, "num_ctx": 4096}
 FALLBACK = "That sounds nice! What do you like to do for fun?"
@@ -66,14 +76,52 @@ LOG_NUMBERS = {"total_ms", "request_ms", "audio_wait_ms", "held_ms", "upload_byt
 # Profiles and rewards (K-D12, K-D13)
 # Tests set TALKER_PROFILES to a separate file, so they can never touch the real profiles.
 PROFILES = Path(os.environ.get("TALKER_PROFILES", str(HERE / "profiles.json")))
+# Saved talk, one plain-text file per session (K-D14). Tests set TALKER_TALKS to a separate folder.
+TALKS = Path(os.environ.get("TALKER_TALKS", str(HERE / "talks")))
 MAX_PROFILES = 8
 DEFAULT_GROWN_UPS = "Aai or Baba, or Grandma or Grandpa"
-LEVELS = {"starting": "just starting (knows a few English words)",
-          "beginner": "beginner (knows simple words and short sentences)",
-          "growing": "growing (can talk in short sentences)"}
+# English levels in order: level 1 first (user, 2026-11-11). id: (label on the page, words for persona.txt).
+LEVELS = {"beginner": ("Level 1: Beginner (single words, short phrases)",
+                       "beginner (says single words and short phrases)"),
+          "growing": ("Level 2: Growing (talks in short sentences)",
+                      "growing (can talk in short sentences)"),
+          "stretching": ("Level 3: Stretching (tries long sentences, often mixed up)",
+                         "stretching (tries long sentences with and, because and so; "
+                         "the words or their order often come out mixed up)"),
+          "confident": ("Level 4: Confident (long sentences, mostly right)",
+                        "confident (talks in long sentences that are mostly right, and can tell a short story)")}
+# No longer a choice (2026-11-11). A profile made before keeps it until a parent picks a new level.
+OLD_LEVELS = {"starting": ("Just starting (old level: please choose a new one)",
+                           "just starting (knows a few English words)")}
 NEW_DAY_STARS, STARS_PER_CELEBRATION = 3, 10
 TOPICS = ["your favourite game", "your best friend", "your favourite food", "a festival you like",
           "your favourite cartoon", "an animal you like", "something fun you did this week", "your favourite colour"]
+# Topic ideas for persona.txt's {topic_ideas} (user approved, 2026-11-11): 3 per session, none of the
+# child's last 15. Toffee's own topics only, never the child's words. TOPICS above is for the goodbye.
+TOPIC_IDEAS = [
+    "a pet you have or want", "your favourite fruit", "what you ate today", "a game you play outside",
+    "a game you play inside", "your toys", "your grandparents", "cooking with your family", "your birthday",
+    "Diwali lights", "kites", "a song you like", "dancing", "drawing and colours", "superheroes", "dinosaurs",
+    "the moon and the stars", "the rain", "the sea and fish", "birds", "insects", "trains and buses",
+    "a park or garden", "the zoo", "what you want to be when you grow up", "a funny dream", "a story you like",
+    "magic and pretend", "your favourite day of the week", "what makes you laugh", "helping at home",
+    "your school bag", "sweets", "ice cream", "a sport you like", "a cartoon you like", "a book with pictures",
+    "the weather today", "a robot", "a tree you know",
+]
+IDEAS_PER_SESSION, IDEAS_REMEMBERED = 3, 15
+# Topics across days (user, 2026-11-11): at End, Gemma names the session's topics; the profile keeps the last 15
+# ("past_topics") and the next Start gives them to persona.txt's {past_topics}. Turns that Toffee answered gently
+# (hurt, scared, sad) are never sent; topics with a personal detail or a number are dropped (K-D8).
+PAST_TOPICS_KEPT, TOPICS_TIMEOUT_S = 15, 20
+# Round 4 test (2026-11-11): this wording gave "mangoes", "outside games"; the first one gave "snack yes", "batting i like".
+TOPICS_ASK = ("Here is a talk between {character}, a pretend {animal}, and a child who is learning English. Name the "
+              "topics the child talked about: 1 to 5 topics, each a normal English name of 1 to 3 words, the way a "
+              "grown-up would write a heading, for example: cricket, mangoes, Diwali rangoli, a pet dog. Do not copy the "
+              "child's words. Leave out names of people, schools, streets, towns and cities, and leave out numbers. "
+              "Leave out anything sad, scary or about getting hurt. Answer only with JSON like this: ")
+TOPICS_FORMAT = '{"topics": ["cricket", "mango"]}'
+# Fields that Session.start fills in persona.txt, besides the str and int values of config.json.
+PERSONA_FIELDS = {"child", "age", "level", "grown_ups", "topic_ideas", "past_topics"}
 STICKERS = [  # (id, title, test on the updated profile and this turn); all reward effort, never correctness
     ("first_chat", "First Chat", lambda p, t: p["turns"] >= 1),
     ("chatterbox", "Chatterbox", lambda p, t: p["turns"] >= 10),
@@ -273,6 +321,11 @@ class ProfileError(Exception):
     """profiles.json cannot be read; the web process stops rather than overwrite it."""
 
 
+def level_info(level_id):
+    """(label, persona words) for a current or old level; None if the id is unknown."""
+    return LEVELS.get(level_id) or OLD_LEVELS.get(level_id)
+
+
 def clean_name(name) -> str:
     if not isinstance(name, str):
         raise TalkerError(400, "Please type the child's name.")
@@ -288,6 +341,8 @@ class Profiles:
 
     def __init__(self, path: Path):
         self.path = path
+        # A turn saves without the session lock, so two saves can overlap. They write the same temp file.
+        self.save_lock = threading.Lock()
         try:
             self.data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         except (OSError, json.JSONDecodeError) as e:
@@ -297,13 +352,14 @@ class Profiles:
 
     def save(self) -> None:
         """Write to a temp file, keep the previous version as <name>.bak, then swap in the new one."""
-        tmp = self.path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, indent=1)
-        if self.path.exists():
-            shutil.copy2(self.path, self.path.with_name(self.path.name + ".bak"))
-        os.replace(tmp, self.path)
+        with self.save_lock:
+            tmp = self.path.with_suffix(".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, indent=1)
+            if self.path.exists():
+                shutil.copy2(self.path, self.path.with_name(self.path.name + ".bak"))
+            os.replace(tmp, self.path)
 
     def listing(self) -> list:
         return [{"name": p["name"], "stars": p["stars"]}
@@ -317,7 +373,9 @@ class Profiles:
 
     def details(self, name) -> dict:
         p = self.find(name)
+        info = level_info(p["level"])
         return {"name": p["name"], "age": p["age"], "level": p["level"], "stars": p["stars"],
+                "level_label": info[0] if info else "Unknown level: please choose one",
                 "words": p["words"], "turns": p["turns"], "sessions": p["sessions"], "days_played": len(p["days"]),
                 "stickers": [{"title": title, "earned": sid in p["stickers"]} for sid, title, _ in STICKERS]}
 
@@ -325,6 +383,20 @@ class Profiles:
         p = self.find(name)
         del self.data[p["name"].lower()]
         self.save()
+
+    def set_level(self, name, level) -> dict:
+        """Change only the level. Stars, stickers and counts stay as they are."""
+        if level not in LEVELS:
+            raise TalkerError(400, "Please choose an English level.")
+        p = self.find(name)
+        old = p["level"]
+        p["level"] = level
+        try:
+            self.save()
+        except OSError as e:
+            p["level"] = old  # keep memory the same as the file
+            raise TalkerError(500, f"could not save the level: {e}") from e
+        return p
 
     def get_or_create(self, req: dict) -> tuple:
         """Return (profile, created). New profiles need age and level."""
@@ -341,7 +413,7 @@ class Profiles:
                 raise TalkerError(400, "Please choose an English level.")
             p = {"name": name, "age": age, "level": level, "grown_ups": DEFAULT_GROWN_UPS, "stars": 0,
                  "turns": 0, "words": 0, "sessions": 0, "days": [], "stickers": [], "next_topic": "",
-                 "topics_used": [], "created": now_iso()}
+                 "topics_used": [], "ideas_used": [], "past_topics": [], "created": now_iso()}
         grown = req.get("grown_ups")
         if isinstance(grown, str) and grown.strip():
             grown = " ".join(grown.split())
@@ -351,6 +423,100 @@ class Profiles:
         if created:
             self.data[name.lower()] = p
         return p, created
+
+
+def talk_dir(name: str) -> Path:
+    """One child's folder of saved talk: the profile key, made safe as a folder name."""
+    return TALKS / urllib.parse.quote(name.lower(), safe="")
+
+
+class TalkFile:
+    """One session's talk as plain text, for the parents (K-D14). The developer never reads it (K-P6).
+
+    Each line is written at once, so a crash loses nothing. A failed write never stops the session.
+    The journal gets the error number only, because the path holds the child's name.
+    """
+
+    def __init__(self, child: str, character: str):
+        self.child, self.character, self.failed = child, character, False
+        started = datetime.now()
+        self.path = talk_dir(child) / f"{started:%Y-%m-%d_%H-%M-%S}.txt"
+        self.write(f"# {character} and {child}, {started:%Y-%m-%d %H:%M}. "
+                   f"{child}'s lines are what the speech-to-text heard, and it can be wrong.")
+
+    def write(self, line: str) -> None:
+        try:
+            TALKS.mkdir(mode=0o700, exist_ok=True)
+            self.path.parent.mkdir(mode=0o700, exist_ok=True)
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError as e:
+            if not self.failed:  # one journal line per session is enough
+                print(f"web: cannot save the talk: errno {e.errno} ({e.strerror})", file=sys.stderr, flush=True)
+            self.failed = True
+
+    def said(self, who: str, text: str) -> None:
+        self.write(f"{datetime.now():%H:%M:%S} {who}: {text}")
+
+
+def pick_ideas(p: dict) -> list:
+    """Topic ideas for this session that the child did not get in recent sessions. Profiles made before
+    2026-11-11 have no "ideas_used" yet; it is added here."""
+    recent = p.setdefault("ideas_used", [])[-IDEAS_REMEMBERED:]
+    ideas = random.sample([t for t in TOPIC_IDEAS if t not in recent], IDEAS_PER_SESSION)
+    p["ideas_used"] = (recent + ideas)[-IDEAS_REMEMBERED:]
+    return ideas
+
+
+UNSURE_REPLY = re.compile(r"\b(did not|didn't|do not|don't) (hear|understand)\b|\bnot sure what\b", re.I)
+
+
+def for_topics(heard: str, reply: str, feeling: str) -> bool:
+    """A turn that may name a topic: the child spoke, Toffee was not gentle (hurt, scared, sad) and understood.
+    Round 3 test: a garbled turn ("the uh go blue tin") became the topic "blue tin"."""
+    return bool(heard) and feeling != "gentle" and not UNSURE_REPLY.search(reply)
+
+
+def clean_topics(raw, personal: set) -> list:
+    """Up to 5 short topic names. Drop any with a number or a personal detail the child said (K-D8),
+    then keep the first 5, so a dropped name does not take a place."""
+    out = []
+    for t in raw[:20] if isinstance(raw, list) else []:
+        if not isinstance(t, str):
+            continue
+        t = " ".join(t.split()).strip(" .,;:'\"")
+        if t and len(t) <= 40 and not re.search(r"\d", t) and not set(words_of(t)) & personal:
+            out.append(t)
+    return out[:5]
+
+
+def session_topics(lines: list, config: dict, personal: set) -> list:
+    """Ask Gemma for the session's topics; [] if that fails. The journal gets the error type only, never words."""
+    ask = TOPICS_ASK.format(character=config["character"], animal=config["animal"]) + TOPICS_FORMAT
+    body = {"model": config["llm_model"], "stream": False, "think": False, "format": "json", "keep_alive": "30m",
+            "options": {"temperature": 0, "num_ctx": LLM_OPTIONS["num_ctx"]},
+            "messages": [{"role": "user", "content": ask + "\n\n" + "\n".join(lines)}]}
+    try:
+        out = http_json(OLLAMA + "/api/chat", body, timeout=TOPICS_TIMEOUT_S)
+        raw = json.loads(out.get("message", {}).get("content", "") or "{}").get("topics")
+    except (TalkerError, json.JSONDecodeError, AttributeError) as e:
+        print(f"web: topics not saved: {type(e).__name__}", file=sys.stderr, flush=True)
+        return []
+    return clean_topics(raw, personal)
+
+
+def remember_topics(p: dict, topics: list) -> None:
+    """Add this session's topics; a topic said again moves to the end. Keep the last PAST_TOPICS_KEPT."""
+    new = {t.lower() for t in topics}
+    past = [t for t in p.setdefault("past_topics", []) if t.lower() not in new]
+    p["past_topics"] = (past + topics)[-PAST_TOPICS_KEPT:]
+
+
+def unknown_fields(persona: str, config: dict) -> set:
+    """Fields in persona.txt that nothing fills. Toffee would say them as they are, so main() stops."""
+    known = PERSONA_FIELDS | {k for k, v in config.items() if isinstance(v, (str, int))}
+    return set(re.findall(r"\{([a-z_]+)\}", persona)) - known
 
 
 def pick_topic(p: dict) -> str:
@@ -368,6 +534,8 @@ class Session:
         self.profile, self.system, self.last_turn, self.started = None, "", 0.0, 0.0
         self.audio, self.empty_streak, self.prev_support, self.today = {}, 0, False, {}
         self.bye_topic = ""  # once the goodbye has named a topic, it stays (what the child heard)
+        self.talk = None  # TalkFile of the session that runs now
+        self.topic_lines, self.personal = [], set()  # for the topics at End: talk lines, personal-detail words
 
     def speak(self, text: str, feeling: str) -> dict:
         """Start the voice on `text`; return {"id", "parts"} for GET /audio/<id>/<n>."""
@@ -401,6 +569,9 @@ class Session:
                     return {"state": "on", "note": "already running", "profile": self.public_profile()}
                 raise TalkerError(409, "Toffee is talking with another child. Press End first.")
             profile, created = self.profiles.get_or_create(req)  # checks the form before any GPU work
+            level = level_info(profile["level"])
+            if level is None:
+                raise TalkerError(400, f"Please choose an English level for {profile['name']}: long press the name.")
             free, _, big = gpu_state()
             if big or free < NEED_FREE_MIB:
                 raise TalkerError(409, "Not now: the computer is busy with other work. Please try later.")
@@ -424,7 +595,9 @@ class Session:
             self.profile = profile
             fields = {**{k: str(v) for k, v in self.config.items() if isinstance(v, (str, int))},
                       **{"child": profile["name"], "age": str(profile["age"]),
-                         "level": LEVELS[profile["level"]], "grown_ups": profile["grown_ups"]}}
+                         "level": level[1], "grown_ups": profile["grown_ups"],
+                         "topic_ideas": ", ".join(pick_ideas(profile)),
+                         "past_topics": ", ".join(profile.get("past_topics") or []) or "nothing yet"}}
             self.system = re.sub(r"\{([a-z_]+)\}", lambda m: fields.get(m.group(1), m.group(0)), self.persona)
             bonus, today = 0, date.today().isoformat()
             if today not in profile["days"]:
@@ -435,10 +608,13 @@ class Session:
             self.today = {"turns": 0, "words": 0, "stars": bonus, "stickers": []}
             greeting = self.greeting(created)
             self.history = [{"role": "assistant", "content": greeting}]
+            self.talk = TalkFile(profile["name"], self.config["character"])
+            self.talk.said(self.config["character"], greeting)
             self.profiles.save()
             greet = self.speak(greeting, "happy")
             self.last_turn = self.started = time.monotonic()
             self.state, self.empty_streak, self.prev_support, self.bye_topic = "on", 0, False, ""
+            self.topic_lines, self.personal = [], set()
             start_ms = round((time.perf_counter() - t0) * 1000)
             log_line({"kind": "start", "start_ms": start_ms, "new_profile": created, "day_bonus": bonus})
             return {"state": "on", "start_ms": start_ms, "profile": self.public_profile(), "greet": greet,
@@ -478,9 +654,18 @@ class Session:
             self.state = "stopping"
             t0 = time.perf_counter()
             summary = None
+            talk_saved = None
+            if self.talk:
+                self.talk.write(f"# end ({reason})")
+                talk_saved = not self.talk.failed
+            topics_saved = 0
             if self.profile:
                 p = self.profile
                 p["sessions"] += 1
+                if self.topic_lines:  # before stop_all(): Gemma is still loaded
+                    topics = session_topics(self.topic_lines, self.config, self.personal)
+                    remember_topics(p, topics)
+                    topics_saved = len(topics)
                 if not p["next_topic"]:
                     p["next_topic"] = pick_topic(p)
                 try:
@@ -489,7 +674,8 @@ class Session:
                     print(f"web: cannot save profiles: {e}", file=sys.stderr, flush=True)
                 summary = {"name": p["name"], **self.today, "stars_total": p["stars"], "next_topic": p["next_topic"]}
             self.stop_all()
-            self.history, self.audio, self.profile, self.system = [], {}, None, ""
+            self.history, self.audio, self.profile, self.system, self.talk = [], {}, None, "", None
+            self.topic_lines, self.personal = [], set()
             freed = False
             while time.perf_counter() - t0 < RELEASE_TIMEOUT_S:
                 try:
@@ -503,7 +689,7 @@ class Session:
             self.state = "off"
             used = gpu_state()[1]
             log_line({"kind": "end", "reason": reason, "end_ms": round((time.perf_counter() - t0) * 1000),
-                      "gpu_used_mib": used, "gpu_freed": freed})
+                      "gpu_used_mib": used, "gpu_freed": freed, "talk_saved": talk_saved, "topics_saved": topics_saved})
             return {"state": "off", "gpu_used_mib": used, "gpu_freed": freed, "summary": summary}
 
     def idle_watch(self) -> None:
@@ -517,7 +703,7 @@ class Session:
         if self.state != "on":
             raise TalkerError(409, "Press Start first.")
         with self.turn_lock:
-            p = self.profile
+            p, talk = self.profile, self.talk  # End may clear them while this turn runs
             t0 = time.perf_counter()
             stt = http_json(STT + "/transcribe", raw=audio, ctype=ctype or "application/octet-stream", timeout=30)
             heard = stt.get("text", "").strip()
@@ -572,6 +758,12 @@ class Session:
             if praise and not time_up and feeling != "gentle":  # no fanfare after hurt or sadness
                 first, *rest = split_parts(reply) or [""]
                 text = " ".join([first] + praise + rest)
+            if talk:
+                talk.said(p["name"], heard or "(nothing heard)")
+                talk.said(self.config["character"], text)
+            self.personal |= personal_words(heard, p["name"])
+            if for_topics(heard, reply, feeling):  # never hurt, scared or sad turns, never unclear ones
+                self.topic_lines += [f"Child: {heard}", f"{self.config['character']}: {reply}"]
             voice = self.speak(text, feeling)
             self.last_turn = time.monotonic()
             numbers = {"stt_ms": stt.get("stt_ms"), "stt_total_ms": round((t1 - t0) * 1000),
@@ -645,7 +837,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"state": s.state, "character": s.config["character"],
                                      "child": s.profile["name"] if s.profile else None})
             elif self.path == "/profiles":
-                self.send_json(200, {"profiles": self.session.profiles.listing(), "levels": list(LEVELS)})
+                self.send_json(200, {"profiles": self.session.profiles.listing(),
+                                     "levels": [{"id": k, "label": v[0]} for k, v in LEVELS.items()]})
             elif self.path.startswith("/profile?"):
                 name = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("name", [""])[0]
                 self.send_json(200, self.session.profiles.details(name))
@@ -683,9 +876,26 @@ class Handler(BaseHTTPRequestHandler):
                 with s.lock:
                     if s.profile and s.profile["name"].lower() == name.lower():
                         raise TalkerError(409, f"{name} is talking with Toffee now. Press End first.")
+                    folder = talk_dir(s.profiles.find(name)["name"])  # 404 first if there is no such child
+                    try:
+                        if folder.parent == TALKS and folder.exists():
+                            shutil.rmtree(folder)
+                    except OSError as e:
+                        raise TalkerError(500, f"Could not delete the saved talks ({e.strerror}). "
+                                               "The profile is kept. Please try again.") from e
                     s.profiles.delete(name)
                 log_line({"kind": "profile deleted"})
                 self.send_json(200, {"ok": True})
+            elif self.path == "/level":
+                req = self.json_body()
+                name, level = clean_name(req.get("name")), req.get("level")
+                s = self.session
+                with s.lock:  # the new level applies from the next Start, so not during this child's session
+                    if s.profile and s.profile["name"].lower() == name.lower():
+                        raise TalkerError(409, f"{name} is talking with Toffee now. Press End first.")
+                    s.profiles.set_level(name, level)
+                log_line({"kind": "level changed"})
+                self.send_json(200, {"ok": True, "level": level, "label": LEVELS[level][0]})
             elif self.path == "/turn":
                 audio = self.body(MAX_UPLOAD)
                 if not audio:
@@ -713,6 +923,9 @@ def main() -> int:
         for key in ("character", "animal", "about", "whisper_model", "llm_model", "idle_minutes", "session_minutes"):
             if key not in config:
                 raise KeyError(key)
+        unknown = unknown_fields(persona, config)
+        if unknown:
+            raise KeyError(f"persona.txt has fields that nothing fills: {sorted(unknown)}")
         for path in (PY_STT, PY_TTS, PAGE):
             if not path.exists():
                 raise FileNotFoundError(path)

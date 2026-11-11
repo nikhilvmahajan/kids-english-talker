@@ -21,8 +21,10 @@ Measured on the author's setup (RTX 3060 12 GB, phone on home Wi-Fi): Toffee's f
 
 ## Privacy and safety design
 
-- No audio is stored. No text the child says is stored or logged. The run log (`talker/log.jsonl`) keeps timing numbers and the names of the checks that acted.
-- Profiles (`talker/profiles.json`, owner-only file access) keep a child's name, age, English level, family words, stars, counts, days played, stickers and the next topic. Nothing the child said.
+- Every child plays with a parent's consent.
+- No audio is stored. Each session's talk is saved as plain text on the computer that runs Toffee (`talker/talks/<child>/`, owner-only file access), so parents can read it back. A child's lines are what the speech-to-text heard. Deleting a profile deletes its saved talks. Speech-to-text, the language model and the voice all run on that computer.
+- The run log (`talker/log.jsonl`) and the service journal keep timing numbers and the names of the checks that acted, never words.
+- Profiles (`talker/profiles.json`, owner-only file access) keep a child's name, age, English level, family words, stars, counts, days played, stickers, the next topic, Toffee's recent topic ideas, and short names of the topics the child talked about on earlier days (for example "cricket, mango"), so Toffee does not ask the same things again. Talk where Toffee answered a hurt, scared or sad child is never used for these names, and a name with a personal detail or a number is dropped.
 - The character instructions (`talker/persona.txt`) forbid asking for a surname, address, school or phone number, secrets, scary stories and bad words. If a child is hurt, scared or sad, Toffee says sorry and asks them to tell a family grown-up "or another grown-up you trust". Code checks back up the most important rules, because the model follows instructions most of the time, not every time.
 - Rewards are for effort, never correctness: stars for speaking, stickers for milestones, no leaderboard between children, no penalty for a missed day.
 - Screen time: after 15 minutes Toffee gets sleepy and says goodbye; the session ends and the GPU is freed. The "End" button also frees all GPU memory (the models run in separate processes that stop).

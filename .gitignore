@@ -17,6 +17,7 @@ talker/profiles.json.bak
 talker/profiles.tmp
 talker/log.jsonl
 talker/run/
+talker/talks/
 
 # Test outputs (results, generated audio, personal grading)
 k_t1/results.jsonl

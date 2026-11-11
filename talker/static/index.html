@@ -109,10 +109,7 @@
     <label>Child's name <input id="kname" maxlength="20" autocomplete="off"></label>
     <label>Age <select id="kage"><option value="">choose</option><option>5</option><option>6</option><option>7</option>
       <option>8</option><option>9</option><option>10</option><option>11</option></select></label>
-    <label>English level <select id="klevel"><option value="">choose</option>
-      <option value="starting">Just starting (a few words)</option>
-      <option value="beginner">Beginner (simple words, short sentences)</option>
-      <option value="growing">Growing (talks in short sentences)</option></select></label>
+    <label>English level <select id="klevel"><option value="">choose</option></select></label>
     <label>Family words (optional) <input id="kfamily" maxlength="60" placeholder="Aai or Baba, or Grandma or Grandpa"></label>
     <button id="kstart">Start</button>
   </div>
@@ -169,6 +166,7 @@
   <div id="mtitle"></div>
   <div id="mbody"></div>
   <button id="mstickers">Stars and stickers</button>
+  <button id="mlevel">English level</button>
   <button class="small" id="mdelete">Delete profile…</button>
   <button class="small" id="mclose">Close</button>
 </div></div>
@@ -181,6 +179,7 @@ const REC_BPS = 24000, MIN_HOLD_MS = 300, FADE_AFTER_MS = 4000;
 const players = [new Audio(), new Audio()];  // take turns: one plays, the other loads the next sentence
 let stream = null, rec = null, chunks = [], mime = "", pressing = false, tDown = 0, busy = false;
 let feelingTimer = null, fadeTimer = null, toastTimer = null, childName = "";
+let levels = [];  // [{id, label}] from the server, level 1 first
 
 function say(text, isError = false) { $("#status").textContent = text; $("#status").className = isError ? "err" : ""; }
 function cat(state) { $("#cat").setAttribute("class", state); }
@@ -243,6 +242,10 @@ async function loadProfiles() {
   try {
     const st = await api("status");
     const r = await api("profiles");
+    levels = r.levels || [];
+    const sel = $("#klevel"), keep = sel.value;
+    fillLevels(sel);
+    sel.value = levels.some((l) => l.id === keep) ? keep : "";
     const box = $("#kids");
     box.textContent = "";
     r.profiles.forEach((p) => {
@@ -296,9 +299,43 @@ async function showStickers() {
   } catch (e) { body.textContent = e.message; }
 }
 
+// Keep the first option ("choose"), then one option per level.
+function fillLevels(sel) {
+  sel.length = 1;
+  levels.forEach((l) => sel.add(new Option(l.label, l.id)));
+}
+
+async function showLevel() {
+  const name = menuName, body = $("#mbody");
+  body.textContent = "Loading…";
+  try {
+    const d = await api(`profile?name=${encodeURIComponent(name)}`);
+    body.textContent = "";
+    const now = document.createElement("div");
+    now.textContent = `Now: ${d.level_label}`;
+    const sel = document.createElement("select");
+    sel.add(new Option("choose", ""));
+    fillLevels(sel);
+    sel.value = levels.some((l) => l.id === d.level) ? d.level : "";
+    const save = document.createElement("button");
+    save.textContent = "Save level";
+    const msg = document.createElement("div");
+    save.addEventListener("click", async () => {
+      if (!sel.value) { msg.textContent = "Please choose a level."; return; }
+      save.disabled = true;
+      try {
+        const r = await api("level", { method: "POST", headers: { "Content-Type": "application/json" },
+                                       body: JSON.stringify({ name, level: sel.value }) });
+        body.textContent = `Saved: ${r.label}. Toffee uses it from the next Start.`;
+      } catch (e) { msg.textContent = e.message; save.disabled = false; }
+    });
+    body.append(now, sel, save, msg);
+  } catch (e) { body.textContent = e.message; }
+}
+
 async function deleteProfile() {
   const name = menuName;
-  const typed = prompt(`This deletes ${name}'s stars and stickers for ever.\nTo confirm, type the name: ${name}`);
+  const typed = prompt(`This deletes ${name}'s stars, stickers and saved talks for ever.\nTo confirm, type the name: ${name}`);
   if (typed === null) return;  // cancelled
   if (typed.trim().toLowerCase() !== name.toLowerCase()) { $("#mbody").textContent = "The name did not match. Nothing was deleted."; return; }
   try {
@@ -487,6 +524,7 @@ async function up(ev) {
 }
 
 $("#mstickers").addEventListener("click", showStickers);
+$("#mlevel").addEventListener("click", showLevel);
 $("#mdelete").addEventListener("click", deleteProfile);
 $("#mclose").addEventListener("click", closeMenu);
 $("#menu").addEventListener("click", (e) => { if (e.target.id === "menu") closeMenu(); });

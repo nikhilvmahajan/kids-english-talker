@@ -40,6 +40,7 @@ Without `enable-linger`, the service starts only when you log in to the desktop 
 |---|---|
 | See if it runs | `systemctl --user status kids-talker` |
 | See its messages (numbers and errors only, never words) | `journalctl --user -u kids-talker -n 50` |
+| Read a child's saved talks | open `talker/talks/<name>/` (one text file per session; only your user can read it) |
 | Restart it (after a code change) | `systemctl --user restart kids-talker` |
 | Stop it until the next boot | `systemctl --user stop kids-talker` |
 | Stop it starting at boot | `systemctl --user disable --now kids-talker` |
